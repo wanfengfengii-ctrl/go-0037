@@ -98,6 +98,52 @@ func TestMalformedJSON(t *testing.T) {
 	}
 }
 
+// TestTopLevelNonObjectRejected covers the case where the request body is a
+// valid JSON value that is not an event object. A top-level JSON string used
+// to panic ("index out of range") inside the duplicate-key scanner because it
+// treated any string token as an object key and indexed an empty stack. All
+// such inputs must now be rejected with a stable protocol error and never
+// panic.
+func TestTopLevelNonObjectRejected(t *testing.T) {
+	cases := map[string]string{
+		"string": `"a plain top-level string"`,
+		"number": "42",
+		"bool":   "true",
+		"null":   "null",
+		"array":  `["a", "b"]`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("decoding top-level %s panicked: %v", name, r)
+				}
+			}()
+			ev, err := DecodeEvent(strings.NewReader(body), opts())
+			if err == nil {
+				t.Fatalf("want error for top-level %s, got event %+v", name, ev)
+			}
+			if err.Category != apperr.CategoryProtocol {
+				t.Fatalf("want protocol category for top-level %s, got %v", name, err)
+			}
+		})
+	}
+}
+
+// TestTopLevelStringRejected pins the reported regression: a top-level JSON
+// string must yield a structured schema_violation, not a panic.
+func TestTopLevelStringRejected(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("decoding top-level string panicked: %v", r)
+		}
+	}()
+	_, err := DecodeEvent(strings.NewReader(`"a plain top-level string"`), opts())
+	if err == nil || err.Code != apperr.CodeSchemaViolation {
+		t.Fatalf("want schema_violation for top-level string, got %v", err)
+	}
+}
+
 func TestWrongType(t *testing.T) {
 	body := strings.Replace(validBoxCreatedJSON(), `"terminal_sequence": 1`, `"terminal_sequence": "abc"`, 1)
 	_, err := DecodeEvent(strings.NewReader(body), opts())

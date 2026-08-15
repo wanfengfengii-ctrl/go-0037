@@ -233,6 +233,15 @@ func scanTokens(dec *json.Decoder, stack []map[string]bool) (string, error) {
 			return "", nil
 		}
 	case string:
+		// A string token is only an object key when it appears inside an
+		// object (stack non-empty). At the top level or inside an array a
+		// string is a scalar value: there is no key to de-duplicate and no
+		// following value token to consume, so skip the key handling and
+		// keep scanning siblings. Indexing the stack here would panic with
+		// "index out of range" on a top-level JSON string such as `"x"`.
+		if len(stack) == 0 {
+			return scanTokens(dec, stack)
+		}
 		// Inside an object, a string token is a key followed by its value.
 		frame := stack[len(stack)-1]
 		if frame[t] {

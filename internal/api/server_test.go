@@ -96,6 +96,40 @@ func TestSubmitMalformedJSON(t *testing.T) {
 	}
 }
 
+// TestSubmitTopLevelString verifies the regression fix for POST /v1/events
+// receiving a top-level JSON string instead of an event object. Previously
+// this panicked ("index out of range") and tore down the request connection
+// without a structured response. It must now return a stable client error,
+// and the server must keep serving subsequent requests.
+func TestSubmitTopLevelString(t *testing.T) {
+	srv, _ := newServer(t)
+	rec := do(t, srv, "POST", "/v1/events", `"a plain top-level string"`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error response is not valid JSON: %v; body=%s", err, rec.Body.String())
+	}
+	if body["code"] == nil {
+		t.Fatalf("error response missing code; body=%s", rec.Body.String())
+	}
+	if body["category"] != string(apperr.CategoryProtocol) {
+		t.Fatalf("category = %v, want protocol", body["category"])
+	}
+
+	// The process must survive: a subsequent valid request still works.
+	rec2 := do(t, srv, "POST", "/v1/events", validBoxCreated())
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("subsequent request status = %d, want 200; body=%s", rec2.Code, rec2.Body.String())
+	}
+	var res map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &res)
+	if res["status"] != "accepted" {
+		t.Fatalf("subsequent request status field = %v, want accepted", res["status"])
+	}
+}
+
 func TestSubmitUnknownField(t *testing.T) {
 	srv, _ := newServer(t)
 	body := strings.Replace(validBoxCreated(), `"box_id": "B1",`, `"box_id": "B1", "extra": 1,`, 1)
