@@ -2,6 +2,8 @@ package ledger
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -192,6 +194,85 @@ func TestVerifyDoesNotModifyData(t *testing.T) {
 	after, _ := l.Coordinator().GetBox("B1")
 	if before.State != after.State || before.Revision != after.Revision {
 		t.Fatalf("verify modified data: before=%v after=%v", before, after)
+	}
+}
+
+// TestOpenReadOnlyDoesNotCreateMissingLedger is the regression test for the
+// silent-creation bug at the facade layer: opening a ledger in read-only mode
+// against a directory that has never existed must fail and must not create the
+// directory, the database file or any bucket structure.
+func TestOpenReadOnlyDoesNotCreateMissingLedger(t *testing.T) {
+	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
+	dbPath := filepath.Join(missingDir, "ledger.db")
+
+	l, err := Open(Config{
+		DataDir:  missingDir,
+		Clock:    infra.NewFixedClock(lt0),
+		IDs:      infra.NewSequenceIDSource("evt"),
+		ReadOnly: true,
+	})
+	if err == nil {
+		_ = l.Close()
+		t.Fatalf("read-only open of missing ledger should fail")
+	}
+	if _, statErr := os.Stat(missingDir); !os.IsNotExist(statErr) {
+		t.Fatalf("read-only open created the data directory: %v", statErr)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Fatalf("read-only open created the database file: %v", statErr)
+	}
+}
+
+// TestOpenReadOnlyVerifiesExistingLedger confirms that a read-only open of an
+// existing, valid ledger succeeds and that verification still passes, while a
+// read-only open of a corrupt ledger reports the integrity failure.
+func TestOpenReadOnlyVerifiesExistingLedger(t *testing.T) {
+	dir := t.TempDir()
+	clock := infra.NewFixedClock(lt0)
+	// First create and populate a ledger with the normal (create) path.
+	l1, err := Open(Config{DataDir: dir, Clock: clock, IDs: infra.NewSequenceIDSource("evt")})
+	if err != nil {
+		t.Fatalf("open1: %v", err)
+	}
+	submitFull(t, l1, "B1")
+	if err := l1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Reopen read-only: must succeed and verify clean.
+	l2, err := Open(Config{DataDir: dir, Clock: clock, IDs: infra.NewSequenceIDSource("evt"), ReadOnly: true})
+	if err != nil {
+		t.Fatalf("read-only open of existing ledger: %v", err)
+	}
+	t.Cleanup(func() { _ = l2.Close() })
+	if err := l2.Verify(); err != nil {
+		t.Fatalf("verify existing ledger read-only: %v", err)
+	}
+	box, _ := l2.Coordinator().GetBox("B1")
+	if box == nil || box.State != string(domain.StateHandedOver) {
+		t.Fatalf("box not readable read-only: %v", box)
+	}
+
+	// Corrupt the projection, then reopen read-only: must report the failure.
+	if err := l2.Close(); err != nil {
+		t.Fatalf("close before corrupt: %v", err)
+	}
+	l3, err := Open(Config{DataDir: dir, Clock: clock, IDs: infra.NewSequenceIDSource("evt")})
+	if err != nil {
+		t.Fatalf("open to corrupt: %v", err)
+	}
+	if err := l3.Store().Update(func(tx *store.Tx) error {
+		return tx.PutBox("B1", []byte(`{"box_id":"B1","state":"closed","revision":99}`))
+	}); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	if err := l3.Close(); err != nil {
+		t.Fatalf("close after corrupt: %v", err)
+	}
+	l4, err := Open(Config{DataDir: dir, Clock: clock, IDs: infra.NewSequenceIDSource("evt"), ReadOnly: true})
+	if err == nil {
+		_ = l4.Close()
+		t.Fatalf("read-only open of corrupt ledger should fail")
 	}
 }
 

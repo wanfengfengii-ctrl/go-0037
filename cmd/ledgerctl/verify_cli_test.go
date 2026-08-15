@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,60 @@ func TestVerifyCLIOnCorruptLedger(t *testing.T) {
 	out, err := exec.Command(bin, "verify", "--data-dir", dataDir).CombinedOutput()
 	if err == nil {
 		t.Fatalf("verify on corrupt ledger should fail, got: %s", out)
+	}
+}
+
+// TestVerifyCLIMissingDataDirFailsAndDoesNotCreate is the regression test for the
+// silent-creation bug: verifying a data directory that has never existed must
+// NOT create the directory, the database file or any bucket structure, and must
+// exit non-zero with a clear error instead of reporting "ledger OK".
+func TestVerifyCLIMissingDataDirFailsAndDoesNotCreate(t *testing.T) {
+	bin := buildLedgerctl(t)
+
+	// A data directory that does not exist and is never created by the test.
+	missingDir := filepath.Join(t.TempDir(), "does-not-exist")
+	dbPath := filepath.Join(missingDir, "ledger.db")
+
+	out, err := exec.Command(bin, "verify", "--data-dir", missingDir).CombinedOutput()
+	if err == nil {
+		t.Fatalf("verify on missing data dir should fail, got: %s", out)
+	}
+	if !strings.Contains(string(out), "no such file") &&
+		!strings.Contains(string(out), "not found") &&
+		!strings.Contains(string(out), "missing") {
+		t.Fatalf("verify on missing data dir should report a clear error, got: %s", out)
+	}
+
+	// Nothing may have been created: neither the directory nor the database file.
+	if _, statErr := os.Stat(missingDir); !os.IsNotExist(statErr) {
+		t.Fatalf("verify created the missing data directory: %v", statErr)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Fatalf("verify created a database file: %v", statErr)
+	}
+}
+
+// TestVerifyCLIMissingDBFileFailsAndDoesNotCreate covers the case where the data
+// directory exists but the ledger database file does not: verify must still
+// fail without creating the file.
+func TestVerifyCLIMissingDBFileFailsAndDoesNotCreate(t *testing.T) {
+	bin := buildLedgerctl(t)
+
+	// The directory exists but contains no ledger.db.
+	emptyDir := t.TempDir()
+	dbPath := filepath.Join(emptyDir, "ledger.db")
+
+	out, err := exec.Command(bin, "verify", "--data-dir", emptyDir).CombinedOutput()
+	if err == nil {
+		t.Fatalf("verify on missing ledger.db should fail, got: %s", out)
+	}
+	if !strings.Contains(string(out), "no such file") &&
+		!strings.Contains(string(out), "not found") &&
+		!strings.Contains(string(out), "missing") {
+		t.Fatalf("verify on missing ledger.db should report a clear error, got: %s", out)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Fatalf("verify created a database file: %v", statErr)
 	}
 }
 

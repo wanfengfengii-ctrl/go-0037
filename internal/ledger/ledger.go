@@ -37,12 +37,26 @@ type Config struct {
 	IDs     infra.IDSource
 	Fault   infra.FaultInjector
 	Window  infra.TimeWindow
+	// ReadOnly opens an existing ledger without creating the data directory,
+	// database file or bucket structure. The ledger must already exist; a
+	// missing or partially-initialised database is reported as an error. This
+	// is the mode used by read-only administration tooling such as
+	// ledgerctl verify, which must never materialise a ledger that was absent.
+	ReadOnly bool
 }
 
 // Open opens (or creates) a ledger and verifies projection integrity.
 func Open(cfg Config) (*Ledger, error) {
 	path := cfg.DataDir + "/ledger.db"
-	s, err := store.Open(path)
+	var (
+		s   *store.Store
+		err error
+	)
+	if cfg.ReadOnly {
+		s, err = store.OpenReadOnly(path)
+	} else {
+		s, err = store.Open(path)
+	}
 	if err != nil {
 		return nil, err
 	}

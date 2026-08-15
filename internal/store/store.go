@@ -113,6 +113,62 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// OpenReadOnly opens an existing store at path in read-only mode. Unlike Open
+// it never creates the data directory, the database file or any buckets: the
+// store must already exist. This is the entry point for read-only
+// administration tooling (e.g. ledgerctl verify), which must respect the
+// read-only boundary and never materialise a ledger that was not there.
+//
+// If path does not exist, is not a valid bbolt database, or is missing any of
+// the expected buckets, an error is returned and nothing is created.
+func OpenReadOnly(path string) (*Store, error) {
+	// Verify the database file already exists before handing the path to bbolt.
+	// bbolt's ReadOnly mode still opens with O_CREATE, so a missing file would
+	// be silently materialised as a 0-byte database (and then fail to init).
+	// A read-only admin tool must never create the data directory, the database
+	// file or any bucket structure, so a missing target is a hard error.
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("store: open read-only: ledger database not found: %s", path)
+		}
+		return nil, fmt.Errorf("store: open read-only: %w", err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("store: open read-only: ledger database path is a directory: %s", path)
+	}
+	if info.Size() == 0 {
+		// bbolt cannot open a 0-byte file in read-only mode (it has no meta
+		// pages and cannot initialise them without writing). Treat it as a
+		// missing/corrupt ledger rather than letting bbolt fail opaquely.
+		return nil, fmt.Errorf("store: open read-only: ledger database is empty or corrupt: %s", path)
+	}
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second, ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("store: open read-only: %w", err)
+	}
+	// Read-only mode cannot create buckets, so verify the expected schema is
+	// already present. A missing or partially-initialised database is reported
+	// here rather than causing nil-pointer panics during verification.
+	var missing []string
+	if err := db.View(func(tx *bolt.Tx) error {
+		for _, b := range []string{bucketEvents, bucketIdem, bucketTerminal, bucketBoxes, bucketPending, bucketRejected, bucketMeta} {
+			if tx.Bucket([]byte(b)) == nil {
+				missing = append(missing, b)
+			}
+		}
+		return nil
+	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: open read-only: %w", err)
+	}
+	if len(missing) > 0 {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: open read-only: database not initialised (missing buckets: %v)", missing)
+	}
+	return &Store{db: db}, nil
+}
+
 // Close closes the underlying database.
 func (s *Store) Close() error {
 	s.mu.Lock()

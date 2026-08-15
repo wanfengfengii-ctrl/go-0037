@@ -52,13 +52,18 @@ func verify() {
 	dataDir := fs.String("data-dir", "./data", "directory holding the ledger database")
 	_ = fs.Parse(os.Args[2:])
 
+	// verify is strictly read-only: it must open an existing ledger and never
+	// create the data directory, database file or bucket structure. A missing
+	// or partially-initialised ledger is reported as an error rather than
+	// silently turned into an empty one that passes verification.
 	l, err := ledger.Open(ledger.Config{
-		DataDir: *dataDir,
-		Clock:   infra.RealClock{},
-		IDs:     infra.RealIDSource{},
+		DataDir:  *dataDir,
+		Clock:    infra.RealClock{},
+		IDs:      infra.RealIDSource{},
+		ReadOnly: true,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "integrity failure: %v\n", err)
+		fmt.Fprintf(os.Stderr, "verify: %v\n", err)
 		os.Exit(1)
 	}
 	defer func() { _ = l.Close() }()
