@@ -168,6 +168,35 @@ func TestIdempotentRetriesSameEventID(t *testing.T) {
 	}
 }
 
+func TestSubmitIdempotencyEnvelopeConflict(t *testing.T) {
+	srv, _ := newServer(t)
+	first := strings.Replace(validBoxCreated(), `"idempotency_key": "k1",`, `"event_id": "event-box-1",
+		"idempotency_key": "k1",`, 1)
+	if rec := do(t, srv, "POST", "/v1/events", first); rec.Code != http.StatusOK {
+		t.Fatalf("first submission status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	conflict := strings.Replace(first, `"box_id": "B1"`, `"box_id": "B2"`, 1)
+	rec := do(t, srv, "POST", "/v1/events", conflict)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("conflicting submission status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode conflict response: %v", err)
+	}
+	if body["code"] != string(apperr.CodeDuplicateConflict) {
+		t.Fatalf("conflict code = %v, want duplicate_conflict", body["code"])
+	}
+
+	if rec := do(t, srv, "GET", "/v1/boxes/B2", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("BOX-2 status = %d, want 404", rec.Code)
+	}
+	if rec := do(t, srv, "GET", "/v1/boxes/B1", ""); rec.Code != http.StatusOK {
+		t.Fatalf("BOX-1 status = %d, want 200", rec.Code)
+	}
+}
+
 func TestIllegalTransition(t *testing.T) {
 	srv, _ := newServer(t)
 	// box_created then immediately close (illegal from drafted).

@@ -176,6 +176,32 @@ func TestIdempotencyDifferentPayload(t *testing.T) {
 	}
 }
 
+func TestIdempotencyEnvelopeFieldsConflict(t *testing.T) {
+	f := newFixture(t)
+	first := mk("event-box-1", "idem-box-created", "terminal-1", 1, "BOX-1", domain.EventBoxCreated, domain.RolePharmacy, t0, "", boxCreatedPayload())
+	if r := f.process(first); r.Status != StatusAccepted {
+		t.Fatalf("first submission status = %s, want accepted", r.Status)
+	}
+
+	conflict := mk("event-box-1", "idem-box-created", "terminal-1", 1, "BOX-2", domain.EventBoxCreated, domain.RolePharmacy, t0, "", boxCreatedPayload())
+	r, err := f.processRaw(conflict)
+	if err != nil {
+		t.Fatalf("conflicting submission returned error: %v", err)
+	}
+	if r == nil || r.Status != StatusRejected || r.Code != string(apperr.CodeDuplicateConflict) {
+		t.Fatalf("want duplicate_conflict, got %+v", r)
+	}
+
+	box1, _ := f.coord.GetBox("BOX-1")
+	if box1 == nil || box1.State != string(domain.StateDrafted) {
+		t.Fatalf("BOX-1 projection changed unexpectedly: %+v", box1)
+	}
+	box2, _ := f.coord.GetBox("BOX-2")
+	if box2 != nil {
+		t.Fatalf("BOX-2 should not be created by a conflicting retry: %+v", box2)
+	}
+}
+
 func TestTerminalSequenceIdempotencyAndConflict(t *testing.T) {
 	f := newFixture(t)
 	// Same terminal seq + same payload returns original result (idempotent).

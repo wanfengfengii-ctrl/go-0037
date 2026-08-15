@@ -170,19 +170,29 @@ func (c *Coordinator) processTx(tx *store.Tx, env *domain.Event, canon []byte, p
 }
 
 func (c *Coordinator) checkDuplicate(tx *store.Tx, env *domain.Event, payloadHash string, now time.Time) *Result {
-	type entry struct{ key, hash string }
+	type entry struct {
+		key  string
+		rec  *store.Record
+		hash string
+	}
 	var found *entry
 	if rec, _ := tx.GetRecord(env.EventID); rec != nil {
-		found = &entry{"event_id", rec.PayloadHash}
+		found = &entry{key: "event_id", rec: rec, hash: rec.PayloadHash}
 	} else if idx, _ := tx.GetIdem(env.IdempotencyKey); idx != nil {
-		found = &entry{"idempotency_key", idx.PayloadHash}
+		rec, _ := tx.GetRecord(idx.EventID)
+		found = &entry{key: "idempotency_key", rec: rec, hash: idx.PayloadHash}
 	} else if idx, _ := tx.GetTerminal(env.TerminalID, env.TerminalSequence); idx != nil {
-		found = &entry{"terminal_sequence", idx.PayloadHash}
+		rec, _ := tx.GetRecord(idx.EventID)
+		found = &entry{key: "terminal_sequence", rec: rec, hash: idx.PayloadHash}
 	}
 	if found == nil {
 		return nil
 	}
-	if found.hash != payloadHash {
+	if found.rec != nil {
+		if !sameEventSemantics(found.rec, env, payloadHash) {
+			return duplicateConflict(found.key, env.EventID, now)
+		}
+	} else if found.hash != payloadHash {
 		return &Result{
 			Status:     StatusRejected,
 			EventID:    env.EventID,
@@ -193,6 +203,32 @@ func (c *Coordinator) checkDuplicate(tx *store.Tx, env *domain.Event, payloadHas
 		}
 	}
 	return c.idempotentResult(tx, env, now)
+}
+
+// sameEventSemantics compares the persisted business envelope and payload.
+// EventID and IdempotencyKey are retry identifiers, so they may differ when a
+// retry is matched by another unique index; all fields that affect event
+// meaning must remain identical.
+func sameEventSemantics(rec *store.Record, env *domain.Event, payloadHash string) bool {
+	return rec.PayloadHash == payloadHash &&
+		rec.TerminalID == env.TerminalID &&
+		rec.TerminalSequence == env.TerminalSequence &&
+		rec.BoxID == env.BoxID &&
+		rec.EventType == string(env.Type) &&
+		rec.Role == string(env.Role) &&
+		rec.OccurredAt.Equal(env.OccurredAt) &&
+		rec.PredecessorEventID == env.PredecessorEventID
+}
+
+func duplicateConflict(key, eventID string, now time.Time) *Result {
+	return &Result{
+		Status:     StatusRejected,
+		EventID:    eventID,
+		Code:       string(apperr.CodeDuplicateConflict),
+		Category:   string(apperr.CategoryConflict),
+		Message:    fmt.Sprintf("key matched on %s but event envelope differs", key),
+		ReceivedAt: now,
+	}
 }
 
 func (c *Coordinator) idempotentResult(tx *store.Tx, env *domain.Event, now time.Time) *Result {
