@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"time"
 
 	"medcold-handoff-ledger/internal/apperr"
 	"medcold-handoff-ledger/internal/coordinator"
@@ -155,8 +154,9 @@ func (l *Ledger) Rebuild() error {
 	})
 }
 
-// rebuildInMemory replays every accepted event onto empty boxes in stable
-// order and returns the resulting projections plus per-event payload hashes.
+// rebuildInMemory replays every accepted event onto empty boxes in the order
+// in which it advanced that box and returns the resulting projections plus
+// per-event payload hashes.
 func (l *Ledger) rebuildInMemory() (map[string]*domain.Box, map[string]string, error) {
 	type accepted struct {
 		rec *store.Record
@@ -217,25 +217,21 @@ func (l *Ledger) rebuildInMemory() (map[string]*domain.Box, map[string]string, e
 }
 
 type evKey struct {
-	occurred time.Time
-	terminal string
-	seq      int64
+	box      string
+	revision int64
 	id       string
 }
 
 func sortKey(r *store.Record) evKey {
-	return evKey{r.OccurredAt, r.TerminalID, r.TerminalSequence, r.EventID}
+	return evKey{r.BoxID, r.Revision, r.EventID}
 }
 
 func (k evKey) less(o evKey) bool {
-	if !k.occurred.Equal(o.occurred) {
-		return k.occurred.Before(o.occurred)
+	if k.box != o.box {
+		return k.box < o.box
 	}
-	if k.terminal != o.terminal {
-		return k.terminal < o.terminal
-	}
-	if k.seq != o.seq {
-		return k.seq < o.seq
+	if k.revision != o.revision {
+		return k.revision < o.revision
 	}
 	return k.id < o.id
 }

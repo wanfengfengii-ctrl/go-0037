@@ -122,6 +122,97 @@ func TestReopenRestoresLedger(t *testing.T) {
 	}
 }
 
+func TestRebuildNonMonotonicOccurredAt(t *testing.T) {
+	dir := t.TempDir()
+	clock := infra.NewFixedClock(lt0)
+	openLedger := func() *Ledger {
+		l, err := Open(Config{DataDir: dir, Clock: clock, IDs: infra.NewSequenceIDSource("evt")})
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		return l
+	}
+
+	l1 := openLedger()
+	t.Cleanup(func() { _ = l1.Close() })
+	events := []*domain.Event{
+		{
+			EventID: "e-create", IdempotencyKey: "k-create", TerminalID: "T1", TerminalSequence: 1,
+			BoxID: "B1", Type: domain.EventBoxCreated, Role: domain.RolePharmacy, OccurredAt: lt0, Payload: boxCreatedPayload(),
+		},
+		{
+			EventID: "e-seg", IdempotencyKey: "k-seg", TerminalID: "T1", TerminalSequence: 2,
+			BoxID: "B1", Type: domain.EventSegmentStarted, Role: domain.RoleCarrier, OccurredAt: lt0.Add(2 * time.Hour),
+			Payload: &domain.SegmentStartedPayload{SegmentID: "SEG1", CarrierID: "C1", Origin: "DEPOT", Destination: "PHARM"},
+		},
+		{
+			EventID: "e-arr", IdempotencyKey: "k-arr", TerminalID: "T1", TerminalSequence: 3,
+			BoxID: "B1", Type: domain.EventArrivalScanned, Role: domain.RoleCarrier, OccurredAt: lt0.Add(time.Hour),
+			Payload: &domain.ArrivalScannedPayload{Location: "PHARM"},
+		},
+	}
+	for _, event := range events {
+		result, ae := l1.Submit(event)
+		if ae != nil || result == nil || result.Status != "accepted" {
+			t.Fatalf("submit %s: result=%+v error=%v", event.EventID, result, ae)
+		}
+	}
+
+	wantState := string(domain.StateAwaitingReceive)
+	assertProjection := func(l *Ledger) {
+		t.Helper()
+		box, err := l.Coordinator().GetBox("B1")
+		if err != nil {
+			t.Fatalf("get box: %v", err)
+		}
+		if box == nil || box.State != wantState || box.Revision != 3 || box.LastEventID != "e-arr" {
+			t.Fatalf("box = %+v, want state=%s revision=3 last_event_id=e-arr", box, wantState)
+		}
+	}
+	assertTimeline := func(l *Ledger) {
+		t.Helper()
+		page, err := l.Coordinator().Timeline("B1", "", 10)
+		if err != nil {
+			t.Fatalf("timeline: %v", err)
+		}
+		want := []string{"e-create", "e-arr", "e-seg"}
+		if len(page.Items) != len(want) {
+			t.Fatalf("timeline length = %d, want %d", len(page.Items), len(want))
+		}
+		for i, eventID := range want {
+			if page.Items[i].EventID != eventID {
+				t.Fatalf("timeline[%d] = %s, want %s", i, page.Items[i].EventID, eventID)
+			}
+		}
+	}
+
+	assertProjection(l1)
+	assertTimeline(l1)
+	if err := l1.Verify(); err != nil {
+		t.Fatalf("verify non-monotonic occurred_at: %v", err)
+	}
+	if err := l1.Rebuild(); err != nil {
+		t.Fatalf("rebuild non-monotonic occurred_at: %v", err)
+	}
+	assertProjection(l1)
+	assertTimeline(l1)
+
+	if err := l1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	l2 := openLedger()
+	t.Cleanup(func() { _ = l2.Close() })
+	assertProjection(l2)
+	assertTimeline(l2)
+	if err := l2.Verify(); err != nil {
+		t.Fatalf("verify after reopen: %v", err)
+	}
+	result, ae := l2.Submit(events[2])
+	if ae != nil || result == nil || result.Status != "accepted" || result.Revision != 3 || result.BoxState != wantState {
+		t.Fatalf("idempotent result after reopen: result=%+v error=%v", result, ae)
+	}
+}
+
 func TestRebuildAfterProjectionDeletion(t *testing.T) {
 	l, _, _ := newLedger(t)
 	submitFull(t, l, "B1")
