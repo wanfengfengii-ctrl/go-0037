@@ -502,3 +502,122 @@ func TestTimelinePaginationStableAndComplete(t *testing.T) {
 		t.Fatalf("saw %d events, want 4", len(seen))
 	}
 }
+
+// TestIdempotencyConflictWhenEnvelopeChanges is the regression for the bug
+// where dedup compared only the payload hash. Reusing every unique key (event
+// id, idempotency key, terminal sequence) while changing any business envelope
+// field must yield a stable duplicate_conflict and write nothing, whereas a
+// semantically identical retry returns the original result.
+func TestIdempotencyConflictWhenEnvelopeChanges(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(e *domain.Event)
+	}{
+		{"box_id", func(e *domain.Event) { e.BoxID = "BOX-2" }},
+		{"event_type", func(e *domain.Event) { e.Type = domain.EventClosed }},
+		{"role", func(e *domain.Event) { e.Role = domain.RoleCarrier }},
+		{"occurred_at", func(e *domain.Event) { e.OccurredAt = t0.Add(time.Hour) }},
+		{"predecessor_event_id", func(e *domain.Event) { e.PredecessorEventID = "e-other" }},
+		{"terminal_id", func(e *domain.Event) { e.TerminalID = "T2" }},
+		{"terminal_sequence", func(e *domain.Event) { e.TerminalSequence = 99 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			orig := mk("e1", "k1", "T1", 1, "BOX-1", domain.EventBoxCreated, domain.RolePharmacy, t0, "", boxCreatedPayload())
+			r1 := f.process(orig)
+			if r1.Status != StatusAccepted || r1.Revision != 1 {
+				t.Fatalf("first submit = %+v, want accepted/rev 1", r1)
+			}
+
+			// A semantically identical retry returns the original result.
+			retry := mk("e1", "k1", "T1", 1, "BOX-1", domain.EventBoxCreated, domain.RolePharmacy, t0, "", boxCreatedPayload())
+			rr := f.process(retry)
+			if rr.Status != StatusAccepted || rr.EventID != "e1" || rr.Revision != 1 {
+				t.Fatalf("identical retry = %+v, want accepted/e1/rev 1", rr)
+			}
+
+			// Reuse every unique key but mutate one business envelope field.
+			conflict := mk("e1", "k1", "T1", 1, "BOX-1", domain.EventBoxCreated, domain.RolePharmacy, t0, "", boxCreatedPayload())
+			tc.mutate(conflict)
+			rc, err := f.processRaw(conflict)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rc == nil || rc.Status != StatusRejected || rc.Code != string(apperr.CodeDuplicateConflict) {
+				t.Fatalf("want rejected/duplicate_conflict, got %+v", rc)
+			}
+			if rc.Retryable {
+				t.Fatalf("duplicate_conflict must not be retryable")
+			}
+			// Exactly one event is stored; the conflicting attempt wrote nothing.
+			n := 0
+			_ = f.store.View(func(tx *store.Tx) error {
+				return tx.ForEachRecord(func(*store.Record) error { n++; return nil })
+			})
+			if n != 1 {
+				t.Fatalf("stored events = %d, want 1 (conflict must not write)", n)
+			}
+			// The original box is untouched.
+			box, _ := f.coord.GetBox("BOX-1")
+			if box == nil || box.State != string(domain.StateDrafted) || box.Revision != 1 {
+				t.Fatalf("BOX-1 = %+v, want drafted/rev 1 (unchanged)", box)
+			}
+			// A box_id change must never create the wrong target.
+			if tc.name == "box_id" {
+				if other, _ := f.coord.GetBox("BOX-2"); other != nil {
+					t.Fatalf("BOX-2 must not be created on conflicting retry")
+				}
+			}
+		})
+	}
+}
+
+// TestIdempotencyConflictReusingEachUniqueKey verifies that reusing any ONE of
+// the unique keys (event id, idempotency key, terminal sequence) — while the
+// other keys differ only in box_id — still yields a duplicate_conflict. The
+// conflict is detected regardless of which lookup handle happens to match, and
+// the wrong box must never be created.
+func TestIdempotencyConflictReusingEachUniqueKey(t *testing.T) {
+	keys := []string{"event_id", "idempotency_key", "terminal_sequence"}
+	for _, key := range keys {
+		t.Run(key, func(t *testing.T) {
+			f := newFixture(t)
+			f.process(mk("e1", "k1", "T1", 1, "BOX-1", domain.EventBoxCreated, domain.RolePharmacy, t0, "", boxCreatedPayload()))
+
+			var conflict *domain.Event
+			switch key {
+			case "event_id":
+				// Reuse event id only; fresh idempotency key, same terminal position.
+				conflict = mk("e1", "k-other", "T1", 1, "BOX-2", domain.EventBoxCreated, domain.RolePharmacy, t0, "", boxCreatedPayload())
+			case "idempotency_key":
+				// Reuse idempotency key only; fresh event id, same terminal position.
+				conflict = mk("e-other", "k1", "T1", 1, "BOX-2", domain.EventBoxCreated, domain.RolePharmacy, t0, "", boxCreatedPayload())
+			case "terminal_sequence":
+				// Reuse terminal sequence only; fresh event id and idempotency key.
+				conflict = mk("e-other", "k-other", "T1", 1, "BOX-2", domain.EventBoxCreated, domain.RolePharmacy, t0, "", boxCreatedPayload())
+			}
+			rc, err := f.processRaw(conflict)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rc == nil || rc.Status != StatusRejected || rc.Code != string(apperr.CodeDuplicateConflict) {
+				t.Fatalf("want rejected/duplicate_conflict, got %+v", rc)
+			}
+			if other, _ := f.coord.GetBox("BOX-2"); other != nil {
+				t.Fatalf("BOX-2 must not be created when reusing %s", key)
+			}
+			box, _ := f.coord.GetBox("BOX-1")
+			if box == nil || box.State != string(domain.StateDrafted) || box.Revision != 1 {
+				t.Fatalf("BOX-1 = %+v, want drafted/rev 1 (unchanged)", box)
+			}
+			n := 0
+			_ = f.store.View(func(tx *store.Tx) error {
+				return tx.ForEachRecord(func(*store.Record) error { n++; return nil })
+			})
+			if n != 1 {
+				t.Fatalf("stored events = %d, want 1", n)
+			}
+		})
+	}
+}

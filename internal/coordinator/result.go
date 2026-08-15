@@ -170,43 +170,61 @@ func (c *Coordinator) processTx(tx *store.Tx, env *domain.Event, canon []byte, p
 }
 
 func (c *Coordinator) checkDuplicate(tx *store.Tx, env *domain.Event, payloadHash string, now time.Time) *Result {
-	type entry struct{ key, hash string }
-	var found *entry
-	if rec, _ := tx.GetRecord(env.EventID); rec != nil {
-		found = &entry{"event_id", rec.PayloadHash}
+	// The unique keys (event id, idempotency key, terminal sequence) are only
+	// lookup handles: they locate a previously recorded event that might be a
+	// retry of this submission. A genuine idempotent retry must additionally be
+	// semantically identical, so after locating a candidate we compare the full
+	// business envelope (box, event type, role, occurred_at, causal predecessor
+	// and terminal position) together with the payload. Reusing a key while any
+	// of those fields changed is a conflicting attempt, not a retry, and must be
+	// rejected as a duplicate_conflict without writing to or affecting any target.
+	var rec *store.Record
+	var matchKey string
+	if r, _ := tx.GetRecord(env.EventID); r != nil {
+		rec, matchKey = r, "event_id"
 	} else if idx, _ := tx.GetIdem(env.IdempotencyKey); idx != nil {
-		found = &entry{"idempotency_key", idx.PayloadHash}
+		rec, _ = tx.GetRecord(idx.EventID)
+		matchKey = "idempotency_key"
 	} else if idx, _ := tx.GetTerminal(env.TerminalID, env.TerminalSequence); idx != nil {
-		found = &entry{"terminal_sequence", idx.PayloadHash}
+		rec, _ = tx.GetRecord(idx.EventID)
+		matchKey = "terminal_sequence"
 	}
-	if found == nil {
+	if rec == nil {
 		return nil
 	}
-	if found.hash != payloadHash {
+	if !envelopeMatches(rec, env, payloadHash) {
 		return &Result{
 			Status:     StatusRejected,
 			EventID:    env.EventID,
 			Code:       string(apperr.CodeDuplicateConflict),
 			Category:   string(apperr.CategoryConflict),
-			Message:    fmt.Sprintf("key matched on %s but payload differs", found.key),
+			Message:    fmt.Sprintf("key matched on %s but event envelope differs", matchKey),
 			ReceivedAt: now,
 		}
 	}
-	return c.idempotentResult(tx, env, now)
+	return c.idempotentResult(rec, now)
 }
 
-func (c *Coordinator) idempotentResult(tx *store.Tx, env *domain.Event, now time.Time) *Result {
-	rec, _ := tx.GetRecord(env.EventID)
-	if rec == nil {
-		if idx, _ := tx.GetIdem(env.IdempotencyKey); idx != nil {
-			rec, _ = tx.GetRecord(idx.EventID)
-		}
-	}
-	if rec == nil {
-		if idx, _ := tx.GetTerminal(env.TerminalID, env.TerminalSequence); idx != nil {
-			rec, _ = tx.GetRecord(idx.EventID)
-		}
-	}
+// envelopeMatches reports whether a stored record and an incoming event describe
+// the same business event: identical payload plus identical business envelope
+// fields (box id, event type, role, occurred_at, causal predecessor and
+// terminal position). The lookup handles themselves (event id, idempotency key)
+// are deliberately not compared: they identify the submission, not the business
+// content, and a legitimate retry reuses them verbatim. occurred_at is compared
+// by instant (Equal) so two timestamps denoting the same moment in different
+// timezone representations are treated as equal.
+func envelopeMatches(rec *store.Record, env *domain.Event, payloadHash string) bool {
+	return rec.PayloadHash == payloadHash &&
+		rec.BoxID == env.BoxID &&
+		rec.EventType == string(env.Type) &&
+		rec.Role == string(env.Role) &&
+		rec.OccurredAt.Equal(env.OccurredAt) &&
+		rec.PredecessorEventID == env.PredecessorEventID &&
+		rec.TerminalID == env.TerminalID &&
+		rec.TerminalSequence == env.TerminalSequence
+}
+
+func (c *Coordinator) idempotentResult(rec *store.Record, now time.Time) *Result {
 	if rec == nil {
 		return nil
 	}

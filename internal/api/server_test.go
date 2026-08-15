@@ -244,6 +244,70 @@ func TestAuditResponseHasRevision(t *testing.T) {
 	}
 }
 
+// TestHTTPIdempotentRetryAndEnvelopeConflict covers the HTTP boundary for the
+// idempotency fix: a semantically identical retry returns 200 with the original
+// event id, while reusing the unique keys with a changed business envelope field
+// (box id, role or occurred_at) yields a 409 duplicate_conflict and never writes
+// to or affects the wrong target.
+func TestHTTPIdempotentRetryAndEnvelopeConflict(t *testing.T) {
+	srv, _ := newServer(t)
+	// Establish the original event for B1.
+	r1 := do(t, srv, "POST", "/v1/events", validBoxCreated())
+	if r1.Code != http.StatusOK {
+		t.Fatalf("first submit = %d, want 200; body=%s", r1.Code, r1.Body.String())
+	}
+	var res1 map[string]any
+	_ = json.Unmarshal(r1.Body.Bytes(), &res1)
+
+	// A semantically identical retry returns the original result (200, same id).
+	r2 := do(t, srv, "POST", "/v1/events", validBoxCreated())
+	if r2.Code != http.StatusOK {
+		t.Fatalf("retry = %d, want 200; body=%s", r2.Code, r2.Body.String())
+	}
+	var res2 map[string]any
+	_ = json.Unmarshal(r2.Body.Bytes(), &res2)
+	if res1["event_id"] != res2["event_id"] {
+		t.Fatalf("idempotent retry event_id differs: %v vs %v", res1["event_id"], res2["event_id"])
+	}
+
+	// Reusing the unique keys while a business envelope field changes must
+	// produce a 409 duplicate_conflict and must not write to the wrong target.
+	cases := []struct{ name, body string }{
+		{"box_id", strings.Replace(validBoxCreated(), `"box_id": "B1"`, `"box_id": "B2"`, 1)},
+		{"role", strings.Replace(validBoxCreated(), `"role": "pharmacy"`, `"role": "carrier"`, 1)},
+		{"occurred_at", strings.Replace(validBoxCreated(), `"occurred_at": "2026-01-01T09:00:00Z"`, `"occurred_at": "2026-01-01T10:00:00Z"`, 1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(t, srv, "POST", "/v1/events", tc.body)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+			}
+			var body map[string]any
+			_ = json.Unmarshal(rec.Body.Bytes(), &body)
+			if body["code"] != string(apperr.CodeDuplicateConflict) {
+				t.Fatalf("code = %v, want duplicate_conflict", body["code"])
+			}
+			if body["status"] != "rejected" {
+				t.Fatalf("status field = %v, want rejected", body["status"])
+			}
+		})
+	}
+	// No wrong target was created; the original box is unchanged.
+	if rec := do(t, srv, "GET", "/v1/boxes/B2", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("B2 = %d, want 404 (must not be created)", rec.Code)
+	}
+	box := do(t, srv, "GET", "/v1/boxes/B1", "")
+	if box.Code != http.StatusOK {
+		t.Fatalf("B1 = %d, want 200", box.Code)
+	}
+	var b map[string]any
+	_ = json.Unmarshal(box.Body.Bytes(), &b)
+	if b["state"] != string(domain.StateDrafted) {
+		t.Fatalf("B1 state = %v, want drafted (unchanged)", b["state"])
+	}
+}
+
 func init() {
 	// Ensure the package compiles with bytes import used somewhere.
 	_ = bytes.Buffer{}
