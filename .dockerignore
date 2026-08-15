@@ -1,0 +1,27 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+out/
+dist/
+
+# Test / coverage artifacts
+*.test
+*.out
+coverage.txt
+
+# Local data directories (never bake into the image)
+data/
+*.db
+*.db.lock
+
+# Editor / OS cruft
+.idea/
+.vscode/
+.DS_Store
