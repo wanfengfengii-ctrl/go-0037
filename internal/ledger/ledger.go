@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"time"
 
 	"medcold-handoff-ledger/internal/apperr"
 	"medcold-handoff-ledger/internal/coordinator"
@@ -216,26 +215,44 @@ func (l *Ledger) rebuildInMemory() (map[string]*domain.Box, map[string]string, e
 	return boxes, hashes, nil
 }
 
+// evKey is the stable ordering for STATE RECONSTRUCTION (rebuild/verify), not
+// for audit display. Events are replayed per box in the order they were
+// actually applied, which is captured by the box's monotonically increasing
+// Revision counter.
+//
+// This is deliberately distinct from the audit ordering
+// (occurred_at, terminal_id, terminal_sequence, event_id) used for timeline
+// queries in the coordinator package. occurred_at may be non-monotonic
+// relative to the state-machine progression: a single terminal can submit, in
+// terminal_sequence order, events whose occurred_at timestamps move backwards
+// (for example an arrival_scanned that occurred before its segment_started).
+// All such events are accepted because the live coordinator applies them in
+// submission order. Replaying them by occurred_at instead would attempt an
+// event before its prerequisite state exists and report an illegal transition,
+// so the rebuild must follow the application order (Revision). The audit
+// timeline keeps occurred_at ordering so queries remain deterministic.
+//
+// The Revision is the box's revision AFTER the event was applied, so for a
+// single box the accepted records carry strictly increasing revisions 1..N in
+// application order. Boxes are independent (an event only mutates its own
+// box), so grouping by boxID and ordering by rev within each box reconstructs
+// the exact pre-close state regardless of cross-box interleaving.
 type evKey struct {
-	occurred time.Time
-	terminal string
-	seq      int64
-	id       string
+	boxID string
+	rev   int64
+	id    string
 }
 
 func sortKey(r *store.Record) evKey {
-	return evKey{r.OccurredAt, r.TerminalID, r.TerminalSequence, r.EventID}
+	return evKey{boxID: r.BoxID, rev: r.Revision, id: r.EventID}
 }
 
 func (k evKey) less(o evKey) bool {
-	if !k.occurred.Equal(o.occurred) {
-		return k.occurred.Before(o.occurred)
+	if k.boxID != o.boxID {
+		return k.boxID < o.boxID
 	}
-	if k.terminal != o.terminal {
-		return k.terminal < o.terminal
-	}
-	if k.seq != o.seq {
-		return k.seq < o.seq
+	if k.rev != o.rev {
+		return k.rev < o.rev
 	}
 	return k.id < o.id
 }
