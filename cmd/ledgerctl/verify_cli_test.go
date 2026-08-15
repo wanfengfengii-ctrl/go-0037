@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,51 @@ import (
 	"medcold-handoff-ledger/internal/ledger"
 	"medcold-handoff-ledger/internal/store"
 )
+
+func TestVerifyCLIOnMissingLedgerDoesNotCreateFiles(t *testing.T) {
+	bin := buildLedgerctl(t)
+	root := t.TempDir()
+
+	for _, tc := range []struct {
+		name    string
+		dataDir string
+	}{
+		{name: "missing data directory", dataDir: filepath.Join(root, "missing")},
+		{name: "missing database file", dataDir: filepath.Join(root, "empty")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "missing database file" {
+				if err := os.Mkdir(tc.dataDir, 0o755); err != nil {
+					t.Fatalf("create empty data directory: %v", err)
+				}
+			}
+
+			out, err := exec.Command(bin, "verify", "--data-dir", tc.dataDir).CombinedOutput()
+			if err == nil {
+				t.Fatalf("verify on missing ledger succeeded: %s", out)
+			}
+			if !strings.Contains(string(out), "ledger.db") {
+				t.Fatalf("verify error does not identify missing ledger.db: %s", out)
+			}
+			if _, statErr := os.Stat(filepath.Join(tc.dataDir, "ledger.db")); !os.IsNotExist(statErr) {
+				t.Fatalf("verify created ledger.db or returned unexpected stat error: %v", statErr)
+			}
+			if tc.name == "missing data directory" {
+				if _, statErr := os.Stat(tc.dataDir); !os.IsNotExist(statErr) {
+					t.Fatalf("verify created data directory or returned unexpected stat error: %v", statErr)
+				}
+			} else {
+				entries, readErr := os.ReadDir(tc.dataDir)
+				if readErr != nil {
+					t.Fatalf("read data directory after verify: %v", readErr)
+				}
+				if len(entries) != 0 {
+					t.Fatalf("verify created files in data directory: %v", entries)
+				}
+			}
+		})
+	}
+}
 
 // TestVerifyCLIOnCleanLedger builds the ledgerctl binary, populates a clean
 // ledger, and asserts the verify subcommand exits 0.

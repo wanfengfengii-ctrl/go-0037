@@ -52,7 +52,7 @@ func verify() {
 	dataDir := fs.String("data-dir", "./data", "directory holding the ledger database")
 	_ = fs.Parse(os.Args[2:])
 
-	l, err := ledger.Open(ledger.Config{
+	l, err := ledger.OpenReadOnly(ledger.Config{
 		DataDir: *dataDir,
 		Clock:   infra.RealClock{},
 		IDs:     infra.RealIDSource{},

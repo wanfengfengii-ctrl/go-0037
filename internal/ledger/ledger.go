@@ -41,8 +41,24 @@ type Config struct {
 
 // Open opens (or creates) a ledger and verifies projection integrity.
 func Open(cfg Config) (*Ledger, error) {
+	return open(cfg, false)
+}
+
+// OpenReadOnly opens an existing ledger without creating or initializing its
+// backing store and verifies projection integrity.
+func OpenReadOnly(cfg Config) (*Ledger, error) {
+	return open(cfg, true)
+}
+
+func open(cfg Config, readOnly bool) (*Ledger, error) {
 	path := cfg.DataDir + "/ledger.db"
-	s, err := store.Open(path)
+	var s *store.Store
+	var err error
+	if readOnly {
+		s, err = store.OpenReadOnly(path)
+	} else {
+		s, err = store.Open(path)
+	}
 	if err != nil {
 		return nil, err
 	}

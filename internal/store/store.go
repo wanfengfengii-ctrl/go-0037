@@ -34,6 +34,16 @@ const (
 	bucketMeta     = "meta"
 )
 
+var requiredBuckets = [...]string{
+	bucketEvents,
+	bucketIdem,
+	bucketTerminal,
+	bucketBoxes,
+	bucketPending,
+	bucketRejected,
+	bucketMeta,
+}
+
 // Status is the processing state of a recorded event.
 type Status string
 
@@ -99,7 +109,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("store: open: %w", err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range []string{bucketEvents, bucketIdem, bucketTerminal, bucketBoxes, bucketPending, bucketRejected, bucketMeta} {
+		for _, b := range requiredBuckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(b)); err != nil {
 				return err
 			}
@@ -109,6 +119,30 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+// OpenReadOnly opens an existing store without creating a directory, database
+// file, or missing buckets.
+func OpenReadOnly(path string) (*Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("store: open read-only %s: %w", path, err)
+	}
+	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	if err != nil {
+		return nil, fmt.Errorf("store: open read-only %s: %w", path, err)
+	}
+	if err := db.View(func(tx *bolt.Tx) error {
+		for _, b := range requiredBuckets {
+			if tx.Bucket([]byte(b)) == nil {
+				return fmt.Errorf("required bucket %q is missing", b)
+			}
+		}
+		return nil
+	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("store: validate read-only %s: %w", path, err)
 	}
 	return &Store{db: db}, nil
 }
