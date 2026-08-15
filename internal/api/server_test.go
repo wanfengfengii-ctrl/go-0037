@@ -155,6 +155,73 @@ func TestTimelineAfterSubmit(t *testing.T) {
 	}
 }
 
+func TestTimelineCursorHTTPClassification(t *testing.T) {
+	srv, _ := newServer(t)
+	submitFullViaAPI(t, srv)
+
+	for _, cursor := range []string{"%25%25%25", "bm90LWpzb24", "e30"} {
+		invalid := do(t, srv, "GET", "/v1/boxes/B1/events?cursor="+cursor, "")
+		if invalid.Code != http.StatusBadRequest {
+			t.Fatalf("cursor %q status = %d, want 400; body=%s", cursor, invalid.Code, invalid.Body.String())
+		}
+		var errBody errorBody
+		if err := json.Unmarshal(invalid.Body.Bytes(), &errBody); err != nil {
+			t.Fatalf("decode cursor %q error: %v", cursor, err)
+		}
+		if errBody.Code != string(apperr.CodeSchemaViolation) || errBody.Category != string(apperr.CategoryProtocol) || errBody.Retryable {
+			t.Fatalf("cursor %q error = %+v, want protocol/schema_violation/non-retryable", cursor, errBody)
+		}
+	}
+
+	first := do(t, srv, "GET", "/v1/boxes/B1/events?limit=2", "")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first page status = %d; body=%s", first.Code, first.Body.String())
+	}
+	var firstPage struct {
+		Items []struct {
+			EventID string `json:"event_id"`
+		} `json:"items"`
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPage); err != nil {
+		t.Fatalf("decode first page: %v", err)
+	}
+	if len(firstPage.Items) != 2 || firstPage.NextCursor == "" {
+		t.Fatalf("first page = %+v, want two items and next cursor", firstPage)
+	}
+
+	second := do(t, srv, "GET", "/v1/boxes/B1/events?limit=2&cursor="+firstPage.NextCursor, "")
+	if second.Code != http.StatusOK {
+		t.Fatalf("second page status = %d; body=%s", second.Code, second.Body.String())
+	}
+	var secondPage struct {
+		Items []struct {
+			EventID string `json:"event_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPage); err != nil {
+		t.Fatalf("decode second page: %v", err)
+	}
+	if len(secondPage.Items) == 0 || secondPage.Items[0].EventID == firstPage.Items[0].EventID || secondPage.Items[0].EventID == firstPage.Items[1].EventID {
+		t.Fatalf("second page = %+v, want continuation after first page", secondPage)
+	}
+
+	if err := srv.led.Close(); err != nil {
+		t.Fatalf("close ledger: %v", err)
+	}
+	storageFailure := do(t, srv, "GET", "/v1/boxes/B1/events", "")
+	if storageFailure.Code != http.StatusInternalServerError {
+		t.Fatalf("storage failure status = %d, want 500; body=%s", storageFailure.Code, storageFailure.Body.String())
+	}
+	var storageErr errorBody
+	if err := json.Unmarshal(storageFailure.Body.Bytes(), &storageErr); err != nil {
+		t.Fatalf("decode storage error: %v", err)
+	}
+	if storageErr.Code != string(apperr.CodeStorageFailure) || storageErr.Category != string(apperr.CategoryStorage) || !storageErr.Retryable {
+		t.Fatalf("storage error = %+v, want storage/storage_failure/retryable", storageErr)
+	}
+}
+
 func TestIdempotentRetriesSameEventID(t *testing.T) {
 	srv, _ := newServer(t)
 	r1 := do(t, srv, "POST", "/v1/events", validBoxCreated())

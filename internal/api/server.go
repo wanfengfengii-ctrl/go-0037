@@ -112,6 +112,15 @@ func (s *Server) handleGetBox(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	boxID := r.PathValue("box_id")
 	cursor := r.URL.Query().Get("cursor")
+	decodedCursor, err := coordinator.DecodeCursor(cursor)
+	if err != nil || decodedCursor != nil && (decodedCursor.OccurredAt.IsZero() || decodedCursor.TerminalID == "" || decodedCursor.TerminalSequence <= 0 || decodedCursor.EventID == "") {
+		message := "invalid cursor"
+		if err != nil {
+			message += ": " + err.Error()
+		}
+		writeError(w, apperr.SchemaViolation(message), http.StatusBadRequest)
+		return
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	page, err := s.led.Coordinator().Timeline(boxID, cursor, limit)
 	if err != nil {
