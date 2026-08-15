@@ -96,6 +96,38 @@ func TestSubmitMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestSubmitTopLevelJSONStringReturnsClientError(t *testing.T) {
+	const body = `"not-an-envelope"`
+
+	t.Run("direct_decode", func(t *testing.T) {
+		_, err := protocol.DecodeEvent(strings.NewReader(body), protocol.DecodeOptions{})
+		if err == nil || err.Code != apperr.CodeSchemaViolation {
+			t.Fatalf("want schema_violation, got %v", err)
+		}
+	})
+
+	t.Run("http", func(t *testing.T) {
+		srv, _ := newServer(t)
+		rec := do(t, srv, http.MethodPost, "/v1/events", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+
+		var response map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if response["code"] != string(apperr.CodeSchemaViolation) {
+			t.Fatalf("code = %v, want schema_violation", response["code"])
+		}
+
+		health := do(t, srv, http.MethodGet, "/healthz", "")
+		if health.Code != http.StatusOK {
+			t.Fatalf("health status after invalid request = %d, want 200", health.Code)
+		}
+	})
+}
+
 func TestSubmitUnknownField(t *testing.T) {
 	srv, _ := newServer(t)
 	body := strings.Replace(validBoxCreated(), `"box_id": "B1",`, `"box_id": "B1", "extra": 1,`, 1)

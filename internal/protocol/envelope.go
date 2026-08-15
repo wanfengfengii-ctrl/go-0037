@@ -233,6 +233,10 @@ func scanTokens(dec *json.Decoder, stack []map[string]bool) (string, error) {
 			return "", nil
 		}
 	case string:
+		if len(stack) == 0 {
+			// A string outside an object is a scalar value, not an object key.
+			break
+		}
 		// Inside an object, a string token is a key followed by its value.
 		frame := stack[len(stack)-1]
 		if frame[t] {
